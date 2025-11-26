@@ -47,9 +47,11 @@ app.prepare().then(async () => {
     const mutedUsers = new Map<string, Set<string>>(); // RoomId -> Set<UserId>
 
     io.on("connection", (socket) => {
-        console.log("\n========================================");
-        console.log("NEW CLIENT CONNECTED:", socket.id);
-        console.log("========================================\n");
+        if (dev) {
+            console.log("\n========================================");
+            console.log("NEW CLIENT CONNECTED:", socket.id);
+            console.log("========================================\n");
+        }
 
         const userId = socket.handshake.auth.userId;
 
@@ -99,7 +101,7 @@ app.prepare().then(async () => {
             if (nickname) {
                 socketNicknames.set(socket.id, nickname);
             }
-            console.log(`Socket ${socket.id} (User ${userId}) joined room ${roomId}`);
+            if (dev) console.log(`Socket ${socket.id} (User ${userId}) joined room ${roomId}`);
 
             if (!roomUsers.has(roomId)) {
                 roomUsers.set(roomId, new Map());
@@ -249,25 +251,31 @@ app.prepare().then(async () => {
                 socket.emit("error", "You are muted");
                 return;
             }
+            if (dev) console.log("Received send-message. MessageId:", data.messageId, "Room:", data.roomId, "Sender:", data.senderId);
             socket.to(data.roomId).emit("receive-message", data);
+            if (dev) console.log("Broadcasted receive-message to room:", data.roomId);
         });
 
         socket.on("message-delivered", (data) => {
+            if (dev) console.log("Received message-delivered:", data, "Broadcasting to room:", data.roomId);
             io.to(data.roomId).emit("message-status", {
                 messageId: data.messageId,
                 status: "delivered",
                 recipientId: data.recipientId,
                 originalSenderId: data.senderId
             });
+            if (dev) console.log("Broadcasted message-status (delivered) to room", data.roomId);
         });
 
         socket.on("message-read", (data) => {
+            if (dev) console.log("Received message-read:", data, "Broadcasting to room:", data.roomId);
             io.to(data.roomId).emit("message-status", {
                 messageId: data.messageId,
                 status: "read",
                 recipientId: data.recipientId,
                 originalSenderId: data.senderId
             });
+            if (dev) console.log("Broadcasted message-status (read) to room", data.roomId);
         });
 
         socket.on("message-reaction", (data: { roomId: string; messageId: string; reaction: string; senderId: string }) => {
@@ -325,7 +333,7 @@ app.prepare().then(async () => {
         });
 
         socket.on("disconnect", () => {
-            console.log("Client disconnected:", socket.id);
+            if (dev) console.log("Client disconnected:", socket.id);
         });
     });
 

@@ -239,6 +239,21 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     recipientId: socket.id
                 });
 
+                // Stress Test Bypass
+                if (payload?.isStressTest) {
+                    setMessages((prev) => [
+                        ...prev,
+                        {
+                            id: messageId || crypto.randomUUID(),
+                            senderId,
+                            content: payload.content || "Stress Test Message",
+                            timestamp: Date.now(),
+                            type: "text",
+                        },
+                    ]);
+                    return;
+                }
+
                 try {
                     const myEncryptedKey = payload.keys[socket.id || ""];
                     if (!myEncryptedKey) return;
@@ -399,12 +414,18 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setInputMessage(e.target.value);
-        socket.emit("typing-start", { roomId });
+
+        if (!typingTimeoutRef.current) {
+            socket.emit("typing-start", { roomId });
+        }
+
         if (typingTimeoutRef.current) {
             clearTimeout(typingTimeoutRef.current);
         }
+
         typingTimeoutRef.current = setTimeout(() => {
             socket.emit("typing-stop", { roomId });
+            typingTimeoutRef.current = null;
         }, 2000);
     };
 
