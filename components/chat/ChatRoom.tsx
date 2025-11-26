@@ -13,12 +13,14 @@ import {
     decryptSymMessage,
     exportSymKey,
     importSymKey,
+    encryptFile,
+    decryptFile,
 } from "@/lib/crypto";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Send, User, Lock, Check, CheckCheck, Smile } from "lucide-react";
+import { Send, User, Lock, Check, CheckCheck, Smile, Paperclip, FileIcon, Download, Image as ImageIcon } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 
@@ -30,6 +32,15 @@ interface Message {
     content: string;
     timestamp: number;
     status?: "sending" | "sent" | "delivered" | "read";
+    type?: "text" | "file";
+    file?: {
+        id: string;
+        name: string;
+        size: number;
+        mimeType: string;
+        url?: string; // For decrypted file blob URL
+    };
+    encryptedKey?: string; // Store the encrypted AES key for this user
 }
 
 interface ChatRoomProps {
@@ -44,6 +55,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     const [nicknames, setNicknames] = useState<Map<string, string>>(new Map());
     const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
     const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+    const [isUploading, setIsUploading] = useState(false);
 
     const searchParams = useSearchParams();
     const router = useRouter();
@@ -60,6 +72,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -169,14 +182,14 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                 }
             });
 
-            socket.on("receive-message", async (data: { senderId: string; payload: any; messageId: string; roomId: string }) => {
+            socket.on("receive-message", async (data: { senderId: string; payload: any; messageId: string; roomId: string; type?: string }) => {
                 console.log("=== RECEIVE-MESSAGE EVENT ===");
                 console.log("Full data:", JSON.stringify(data, null, 2));
                 console.log("Sender ID:", data.senderId);
                 console.log("Message ID:", data.messageId);
                 console.log("My socket.id:", socket.id);
 
-                const { senderId, payload, messageId } = data;
+                const { senderId, payload, messageId, type } = data;
 
                 // Emit Delivered immediately
                 console.log("Emitting message-delivered for messageId:", messageId, "original sender:", senderId);
@@ -202,8 +215,15 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     // 3. Import AES Key
                     const aesKey = await importSymKey(aesKeyRaw);
 
-                    // 4. Decrypt Content
-                    const content = await decryptSymMessage(aesKey, payload.content);
+                    let content = "";
+                    let fileData = undefined;
+
+                    if (type === "file") {
+                        content = "[FILE]";
+                        fileData = payload.file;
+                    } else {
+                        content = await decryptSymMessage(aesKey, payload.content);
+                    }
 
                     setMessages((prev) => [
                         ...prev,
@@ -212,6 +232,9 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                             senderId,
                             content,
                             timestamp: Date.now(),
+                            type: (type as "text" | "file") || "text",
+                            file: fileData,
+                            encryptedKey: myEncryptedKey // Store for later use (download)
                         },
                     ]);
 
@@ -304,6 +327,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                 },
                 senderId: socket.id,
                 messageId,
+                type: "text"
             });
 
             // Add to local UI
@@ -315,6 +339,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     content: inputMessage,
                     timestamp: Date.now(),
                     status: "sent",
+                    type: "text"
                 },
             ]);
 
@@ -365,6 +390,106 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
         setShowEmojiPicker(false);
     };
 
+    const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file || !myKeys.current) return;
+
+        if (file.size > 10 * 1024 * 1024) {
+            alert("File size must be less than 10MB");
+            return;
+        }
+
+        setIsUploading(true);
+        try {
+            // 1. Generate File AES Key
+            const fileAesKey = await generateSymKey();
+
+            // 2. Encrypt File Content
+            const fileBuffer = await file.arrayBuffer();
+            const encryptedFileContent = await encryptFile(fileAesKey, fileBuffer);
+
+            // 3. Create Blob from encrypted content for upload
+            // encryptedFileContent is now ArrayBuffer
+            const encryptedBlob = new Blob([encryptedFileContent], { type: "application/octet-stream" });
+            const formData = new FormData();
+            formData.append("file", encryptedBlob, file.name);
+
+            // 4. Upload Encrypted File
+            const response = await fetch("/api/upload", {
+                method: "POST",
+                body: formData,
+            });
+
+            if (!response.ok) throw new Error("Upload failed");
+            const fileData = await response.json();
+
+            // 5. Encrypt File AES Key for EACH participant (same as message keys)
+            const rawFileAesKey = await exportSymKey(fileAesKey);
+            const keysMap: Record<string, string> = {};
+
+            // For other users
+            for (const [userId, pubKey] of otherUsersKeys.current.entries()) {
+                const encryptedKey = await encryptMessage(pubKey, rawFileAesKey);
+                keysMap[userId] = encryptedKey;
+            }
+
+            // Encrypt key for myself too
+            if (myKeys.current && socket.id) {
+                const myEncryptedKey = await encryptMessage(myKeys.current.public, rawFileAesKey);
+                keysMap[socket.id] = myEncryptedKey;
+            }
+
+            const messageId = crypto.randomUUID();
+
+            // 6. Send Message with File Metadata
+            socket.emit("send-message", {
+                roomId,
+                payload: {
+                    content: "[FILE]",
+                    keys: keysMap,
+                    file: {
+                        id: fileData.fileId,
+                        name: file.name,
+                        size: file.size,
+                        mimeType: file.type,
+                    }
+                },
+                senderId: socket.id,
+                messageId,
+                type: "file"
+            });
+
+            // Add to local UI
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: messageId,
+                    senderId: "me",
+                    content: "[FILE]",
+                    timestamp: Date.now(),
+                    status: "sent",
+                    type: "file",
+                    file: {
+                        id: fileData.fileId,
+                        name: file.name,
+                        size: file.size,
+                        mimeType: file.type,
+                    },
+                    encryptedKey: socket.id ? keysMap[socket.id] : undefined
+                },
+            ]);
+
+            // Reset file input
+            if (fileInputRef.current) fileInputRef.current.value = "";
+
+        } catch (error) {
+            console.error("File upload error:", error);
+            alert("Failed to upload file");
+        } finally {
+            setIsUploading(false);
+        }
+    };
+
     const getTypingIndicator = () => {
         if (typingUsers.size === 0) return null;
 
@@ -378,6 +503,41 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             return `${typingNames[0]} and ${typingNames[1]} are typing...`;
         } else {
             return `${typingNames.length} people are typing...`;
+        }
+    };
+
+    const handleDownload = async (fileId: string, fileName: string, encryptedKey: string) => {
+        try {
+            // 1. Fetch Encrypted File
+            const response = await fetch(`/api/files/${fileId}`);
+            if (!response.ok) throw new Error("Download failed");
+
+            const encryptedBlob = await response.blob();
+            const encryptedBuffer = await encryptedBlob.arrayBuffer();
+
+            // 2. Decrypt AES Key
+            if (!myKeys.current) return;
+            const aesKeyRaw = await decryptMessage(myKeys.current.private, encryptedKey);
+            const aesKey = await importSymKey(aesKeyRaw);
+
+            // 3. Decrypt File Content
+            // decryptFile now accepts ArrayBuffer directly
+            const decryptedBuffer = await decryptFile(aesKey, encryptedBuffer);
+
+            // 4. Create Download Link
+            const blob = new Blob([decryptedBuffer]);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+        } catch (error) {
+            console.error("Download error:", error);
+            alert("Failed to download file");
         }
     };
 
@@ -419,7 +579,30 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                                                 : "bg-slate-800 text-slate-100"
                                                 }`}
                                         >
-                                            <p>{msg.content}</p>
+                                            {msg.type === "file" && msg.file ? (
+                                                <div className="flex items-center gap-3">
+                                                    <div className="p-2 bg-black/20 rounded-lg">
+                                                        <FileIcon className="w-6 h-6" />
+                                                    </div>
+                                                    <div className="flex flex-col overflow-hidden">
+                                                        <span className="text-sm font-medium truncate max-w-[150px]">{msg.file.name}</span>
+                                                        <span className="text-xs opacity-70">{(msg.file.size / 1024).toFixed(1)} KB</span>
+                                                    </div>
+                                                    {!isMe && msg.encryptedKey && (
+                                                        <Button
+                                                            variant="ghost"
+                                                            size="icon"
+                                                            className="h-8 w-8 hover:bg-black/20 rounded-full"
+                                                            onClick={() => handleDownload(msg.file!.id, msg.file!.name, msg.encryptedKey!)}
+                                                        >
+                                                            <Download className="w-4 h-4" />
+                                                        </Button>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <p>{msg.content}</p>
+                                            )}
+
                                             <span className="text-[10px] opacity-50 block mt-1 flex items-center justify-end gap-1">
                                                 {new Date(msg.timestamp).toLocaleTimeString()}
                                                 {isMe && (
@@ -463,6 +646,27 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                             }}
                             className="flex gap-2"
                         >
+                            <input
+                                type="file"
+                                ref={fileInputRef}
+                                onChange={handleFileSelect}
+                                className="hidden"
+                            />
+                            <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                onClick={() => fileInputRef.current?.click()}
+                                className="text-slate-400 hover:text-emerald-400 hover:bg-slate-800"
+                                disabled={isUploading}
+                            >
+                                {isUploading ? (
+                                    <div className="w-4 h-4 border-2 border-slate-400 border-t-emerald-400 rounded-full animate-spin" />
+                                ) : (
+                                    <Paperclip className="w-5 h-5" />
+                                )}
+                            </Button>
+
                             <div className="relative flex-1">
                                 <Input
                                     ref={inputRef}

@@ -65,10 +65,16 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
     return btoa(binary);
 }
 
+function base64ToArrayBuffer(base64: string) {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+}
 
-// ... existing RSA functions ...
-
-// AES-GCM Functions for Hybrid Encryption
+// ========== AES-GCM Functions for Hybrid Encryption ==========
 
 export async function generateSymKey() {
     return await crypto.subtle.generateKey(
@@ -139,13 +145,46 @@ export async function importSymKey(rawKey: string) {
     );
 }
 
-function base64ToArrayBuffer(base64: string) {
-    const binary_string = atob(base64);
-    const len = binary_string.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-        bytes[i] = binary_string.charCodeAt(i);
-    }
-    return bytes.buffer;
+// ========== FILE ENCRYPTION FUNCTIONS ==========
+
+/**
+ * Encrypt a file (ArrayBuffer) with AES-GCM
+ */
+export async function encryptFile(aesKey: CryptoKey, fileData: ArrayBuffer): Promise<ArrayBuffer> {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encrypted = await crypto.subtle.encrypt(
+        {
+            name: "AES-GCM",
+            iv,
+        },
+        aesKey,
+        fileData
+    );
+
+    // Combine IV + encrypted data
+    const combined = new Uint8Array(iv.length + encrypted.byteLength);
+    combined.set(iv, 0);
+    combined.set(new Uint8Array(encrypted), iv.length);
+
+    return combined.buffer;
 }
 
+/**
+ * Decrypt a file (ArrayBuffer) with AES-GCM
+ */
+export async function decryptFile(aesKey: CryptoKey, encryptedData: ArrayBuffer): Promise<ArrayBuffer> {
+    const combined = new Uint8Array(encryptedData);
+    const iv = combined.slice(0, 12);
+    const data = combined.slice(12);
+
+    const decrypted = await crypto.subtle.decrypt(
+        {
+            name: "AES-GCM",
+            iv: iv,
+        },
+        aesKey,
+        data
+    );
+
+    return decrypted;
+}
