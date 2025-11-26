@@ -47,6 +47,7 @@ interface Message {
         url?: string;
     };
     encryptedKey?: string;
+    originalPayload?: any; // Store original encrypted payload for history
     reactions?: Record<string, string[]>; // emoji -> [senderIds]
 }
 
@@ -76,6 +77,15 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     const [newLimit, setNewLimit] = useState("");
     const [newPassword, setNewPassword] = useState("");
 
+    // History Settings
+    const [saveHistory, setSaveHistory] = useState(false);
+
+    // Load History Settings on Mount (Client-side only)
+    useEffect(() => {
+        const saved = localStorage.getItem(`save_history_pref_${roomId}`);
+        if (saved === "true") setSaveHistory(true);
+    }, [roomId]);
+
     const searchParams = useSearchParams();
     const router = useRouter();
     const nickname = searchParams.get("nickname") || "Anonymous";
@@ -97,33 +107,58 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
 
+    // Load History Settings
+    // Save History Logic
+    // Auto-scroll on new messages
     useEffect(() => {
         scrollToBottom();
-        // Save to local storage if enabled
-        const saveHistory = localStorage.getItem("save_history") === "true";
-        if (saveHistory && messages.length > 0) {
-            localStorage.setItem(`chat_history_${roomId}`, JSON.stringify({
-                timestamp: Date.now(),
-                messages
-            }));
-        }
-    }, [messages, roomId]);
+    }, [messages]);
 
+    // Save History Logic
     useEffect(() => {
-        // Load history if enabled and valid (< 24h)
-        const saveHistory = localStorage.getItem("save_history") === "true";
-        if (saveHistory) {
-            const stored = localStorage.getItem(`chat_history_${roomId}`);
-            if (stored) {
-                const { timestamp, messages: storedMessages } = JSON.parse(stored);
-                if (Date.now() - timestamp < 24 * 60 * 60 * 1000) {
-                    setMessages(storedMessages);
-                } else {
-                    localStorage.removeItem(`chat_history_${roomId}`);
-                }
+        const timeoutId = setTimeout(() => {
+            if (saveHistory && messages.length > 0) {
+                const historyToSave = messages.map(msg => ({
+                    ...msg,
+                    content: msg.senderId === "me" ? msg.content : "[ENCRYPTED]",
+                    originalPayload: msg.originalPayload,
+                    encryptedKey: msg.encryptedKey
+                }));
+
+                localStorage.setItem(`chat_history_${roomId}`, JSON.stringify({
+                    timestamp: Date.now(),
+                    messages: historyToSave
+                }));
+            } else if (!saveHistory) {
+                // Only remove if explicitly disabled
+            }
+        }, 1000);
+
+        return () => clearTimeout(timeoutId);
+    }, [messages, roomId, saveHistory]);
+
+    // Key Persistence Helpers
+    const saveKeys = async (keys: { public: CryptoKey; private: CryptoKey }) => {
+        const exportedPub = await exportKey(keys.public);
+        const exportedPriv = await exportKey(keys.private);
+        localStorage.setItem(`chat_keys_${roomId}`, JSON.stringify({ pub: exportedPub, priv: exportedPriv }));
+    };
+
+    const loadKeys = async () => {
+        const stored = localStorage.getItem(`chat_keys_${roomId}`);
+        if (stored) {
+            try {
+                const { pub, priv } = JSON.parse(stored);
+                const publicKey = await importKey(pub, ["encrypt"]);
+                const privateKey = await importKey(priv, ["decrypt"]);
+                return { public: publicKey, private: privateKey };
+            } catch (e) {
+                console.error("Failed to load keys", e);
+                return null;
             }
         }
-    }, [roomId]);
+        return null;
+    };
 
     useEffect(() => {
         const init = async () => {
@@ -133,11 +168,51 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                 sessionStorage.setItem("userId", userId);
             }
 
-            const keys = await generateKeyPair();
-            myKeys.current = { public: keys.publicKey, private: keys.privateKey };
+            // Try to load existing keys first
+            let keys = await loadKeys();
+            if (!keys) {
+                const newKeys = await generateKeyPair();
+                keys = { public: newKeys.publicKey, private: newKeys.privateKey };
+                await saveKeys(keys);
+            }
+            myKeys.current = keys;
 
             socket.auth = { userId };
             socket.connect();
+
+            // Load History and Decrypt
+            if (saveHistory) {
+                const stored = localStorage.getItem(`chat_history_${roomId}`);
+                if (stored) {
+                    const { timestamp, messages: storedMessages } = JSON.parse(stored);
+                    if (Date.now() - timestamp < 24 * 60 * 60 * 1000) {
+                        // Decrypt messages
+                        const decryptedMessages = await Promise.all(storedMessages.map(async (msg: Message) => {
+                            if (msg.senderId === "me") return msg; // Already cleartext
+                            if (!msg.originalPayload || !msg.encryptedKey) return msg; // Can't decrypt
+
+                            try {
+                                const aesKeyRaw = await decryptMessage(myKeys.current!.private, msg.encryptedKey);
+                                const aesKey = await importSymKey(aesKeyRaw);
+
+                                let content = "";
+                                if (msg.type === "file") {
+                                    content = "[FILE]";
+                                } else {
+                                    content = await decryptSymMessage(aesKey, msg.originalPayload.content);
+                                }
+                                return { ...msg, content };
+                            } catch (e) {
+                                console.error("Failed to decrypt history message", e);
+                                return { ...msg, content: "[Decryption Failed]" };
+                            }
+                        }));
+                        setMessages(decryptedMessages);
+                    } else {
+                        localStorage.removeItem(`chat_history_${roomId}`);
+                    }
+                }
+            }
 
             const storedPassword = sessionStorage.getItem("temp_room_password");
             const password = storedPassword || searchParams.get("password");
@@ -150,8 +225,6 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     router.push("/");
                     return;
                 }
-                // Update URL with nickname (optional, but good for consistency)
-                // For now, we just use it for the socket connection
                 sessionStorage.setItem("nickname_set", "true");
                 socket.emit("join-room", { roomId, nickname: enteredNickname, userLimit, password });
             } else {
@@ -165,7 +238,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     setShowPasswordModal(true);
                     if (err === "Invalid password") alert("Invalid password");
                 } else if (err === "You are muted") {
-                    alert(err); // Just alert, don't redirect
+                    alert(err);
                 } else {
                     alert(err);
                     router.push("/");
@@ -235,6 +308,11 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             socket.on("user-left", (data: { socketId: string; userId: string }) => {
                 otherUsersKeys.current.delete(data.socketId);
                 setParticipants(prev => prev.filter(p => p.socketId !== data.socketId));
+                setTypingUsers(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(data.socketId);
+                    return newSet;
+                });
             });
 
             socket.on("signal", async (data: { sender: string; signal: any }) => {
@@ -313,18 +391,22 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                         content = await decryptSymMessage(aesKey, payload.content);
                     }
 
-                    setMessages((prev) => [
-                        ...prev,
-                        {
-                            id: messageId || crypto.randomUUID(),
-                            senderId,
-                            content,
-                            timestamp: Date.now(),
-                            type: (type as "text" | "file") || "text",
-                            file: fileData,
-                            encryptedKey: myEncryptedKey
-                        },
-                    ]);
+                    setMessages((prev) => {
+                        if (prev.some(m => m.id === (messageId || ""))) return prev;
+                        return [
+                            ...prev,
+                            {
+                                id: messageId || crypto.randomUUID(),
+                                senderId,
+                                content,
+                                timestamp: Date.now(),
+                                type: (type as "text" | "file") || "text",
+                                file: fileData,
+                                encryptedKey: myEncryptedKey,
+                                originalPayload: payload // Store original payload for history
+                            },
+                        ];
+                    });
 
                     socket.emit("message-read", {
                         roomId,
@@ -401,7 +483,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             socket.off("message-reaction-update");
             socket.disconnect();
         };
-    }, [roomId, nickname, userLimit, router, searchParams]);
+    }, [roomId, nickname, userLimit, router, searchParams, saveHistory]); // Added saveHistory to dependency to reload if toggled? No, just initial load.
 
     const sendMessage = async () => {
         if (!inputMessage.trim() || !myKeys.current) return;
@@ -424,12 +506,14 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
 
             const messageId = crypto.randomUUID();
 
+            const payload = {
+                content: encryptedContent,
+                keys: keysMap,
+            };
+
             socket.emit("send-message", {
                 roomId,
-                payload: {
-                    content: encryptedContent,
-                    keys: keysMap,
-                },
+                payload,
                 senderId: socket.id,
                 messageId,
                 type: "text"
@@ -517,18 +601,21 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                 keysMap[socket.id] = myEncryptedKey;
             }
             const messageId = crypto.randomUUID();
+
+            const payload = {
+                content: "[FILE]",
+                keys: keysMap,
+                file: {
+                    id: fileData.fileId,
+                    name: file.name,
+                    size: file.size,
+                    mimeType: file.type,
+                }
+            };
+
             socket.emit("send-message", {
                 roomId,
-                payload: {
-                    content: "[FILE]",
-                    keys: keysMap,
-                    file: {
-                        id: fileData.fileId,
-                        name: file.name,
-                        size: file.size,
-                        mimeType: file.type,
-                    }
-                },
+                payload,
                 senderId: socket.id,
                 messageId,
                 type: "file"
@@ -638,9 +725,9 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     const COMMON_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "😡"];
 
     return (
-        <div className="flex flex-col h-screen max-w-5xl mx-auto p-2 md:p-4">
-            <Card className="flex-1 !py-0 !px-0 flex flex-col bg-background/50 backdrop-blur-sm border-border/50 shadow-2xl overflow-hidden">
-                <CardHeader className="border-b border-border/40 py-3 px-4 flex flex-col md:flex-row items-start md:items-center justify-between bg-background/40 backdrop-blur-md sticky top-0 z-10 gap-3">
+        <div className="flex flex-col h-[100dvh] max-w-5xl mx-auto md:p-4 bg-background">
+            <Card className="flex-1 !py-0 !px-0 flex flex-col bg-background/50 backdrop-blur-sm border-border/50 shadow-2xl overflow-hidden rounded-none md:rounded-xl border-x-0 md:border-x">
+                <CardHeader className="border-b border-border/40 py-2 px-3 md:py-3 md:px-4 flex flex-row items-center justify-between bg-background/40 backdrop-blur-md sticky top-0 z-10 gap-2 shrink-0">
                     <div className="flex items-center gap-3 w-full md:w-auto justify-between md:justify-start">
                         <div className="flex items-center gap-3">
                             <Button variant="ghost" size="icon" onClick={() => router.push("/")} className="mr-1 rounded-full hover:bg-muted">
@@ -650,8 +737,8 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                                 <Lock className="w-5 h-5 text-white" />
                             </div>
                             <div>
-                                <CardTitle className="text-base md:text-lg flex items-center gap-2 font-bold tracking-tight">
-                                    Room: <span className="font-mono text-emerald-500 truncate max-w-[100px] md:max-w-none">{roomId}</span>
+                                <CardTitle className="text-sm md:text-lg flex items-center gap-2 font-bold tracking-tight">
+                                    Room: <span className="font-mono text-emerald-500 truncate max-w-[80px] md:max-w-none">{roomId}</span>
                                 </CardTitle>
                                 <p className="text-[10px] md:text-xs text-muted-foreground flex items-center gap-1">
                                     <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
@@ -667,34 +754,15 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                                 <Users className="w-4 h-4 mr-2" />
                                 <span>{participantCount}</span>
                             </Button>
-                            {isCreator && (
-                                <Button variant="ghost" size="icon" onClick={() => setShowSettingsModal(true)} className="text-muted-foreground hover:text-foreground rounded-full h-8 w-8">
-                                    <Settings className="w-4 h-4" />
-                                </Button>
-                            )}
+                            {/* Settings available to everyone now, but content differs */}
+                            <Button variant="ghost" size="icon" onClick={() => setShowSettingsModal(true)} className="text-muted-foreground hover:text-foreground rounded-full h-8 w-8">
+                                <Settings className="w-4 h-4" />
+                            </Button>
                         </div>
                         <div className="h-6 w-px bg-border/50 mx-1" />
-                        {/* <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={joinCall}
-                            className="text-muted-foreground hover:text-emerald-500 hover:bg-emerald-500/10 rounded-full transition-all"
-                            title="Start Call"
-                        >
-                            <Phone className="w-5 h-5" />
-                        </Button> */}
                         <ThemeToggle />
                     </div>
                 </CardHeader>
-
-                {/* {localStream && (
-                    <CallInterface
-                        localStream={localStream}
-                        remoteStreams={remoteStreams}
-                        onLeave={leaveCall}
-                        nicknames={nicknames}
-                    />
-                )} */}
 
                 <CardContent className="flex-1 overflow-hidden p-0 relative">
                     <ScrollArea className="h-full px-4 py-2">
@@ -967,42 +1035,86 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                                     <X className="w-4 h-4 text-slate-400" />
                                 </Button>
                             </CardHeader>
-                            <CardContent className="space-y-4">
-                                <div className="space-y-2">
-                                    <label className="text-sm text-slate-400">User Limit</label>
-                                    <Input
-                                        type="number"
-                                        placeholder="Max users"
-                                        value={newLimit}
-                                        onChange={(e) => setNewLimit(e.target.value)}
-                                        className="bg-slate-950 border-slate-800 text-white"
+                            <CardContent className="space-y-6">
+                                {/* Chat History Toggle - Available to ALL users */}
+                                <div className="flex items-center justify-between space-x-2 p-3 bg-slate-950/50 rounded-lg border border-slate-800">
+                                    <div className="space-y-0.5">
+                                        <label className="text-sm font-medium text-white">Save Chat History (1 Day)</label>
+                                        <p className="text-xs text-slate-400">Securely save encrypted messages on this device.</p>
+                                    </div>
+                                    <input
+                                        type="checkbox"
+                                        checked={saveHistory}
+                                        onChange={(e) => {
+                                            const checked = e.target.checked;
+                                            setSaveHistory(checked);
+                                            localStorage.setItem(`save_history_pref_${roomId}`, String(checked));
+                                            if (!checked) {
+                                                localStorage.removeItem(`chat_history_${roomId}`);
+                                                // We don't clear messages from state, just stop saving future ones and clear storage
+                                            }
+                                        }}
+                                        className="w-5 h-5 accent-emerald-500 rounded cursor-pointer"
                                     />
                                 </div>
-                                <div className="space-y-2">
-                                    <label className="text-sm text-slate-400">Update Password (leave empty to remove)</label>
-                                    <Input
-                                        type="password"
-                                        placeholder="New password"
-                                        value={newPassword}
-                                        onChange={(e) => setNewPassword(e.target.value)}
-                                        className="bg-slate-950 border-slate-800 text-white"
-                                    />
-                                </div>
-                                <Button
-                                    onClick={() => {
-                                        socket.emit("update-room-settings", {
-                                            roomId,
-                                            limit: newLimit ? parseInt(newLimit) : undefined,
-                                            password: newPassword
-                                        });
-                                        setShowSettingsModal(false);
-                                        setNewPassword("");
-                                        setNewLimit("");
-                                    }}
-                                    className="w-full bg-emerald-600 hover:bg-emerald-700"
-                                >
-                                    Save Changes
-                                </Button>
+
+                                {isCreator && (
+                                    <>
+                                        <div className="space-y-2">
+                                            <label className="text-sm text-slate-400">User Limit</label>
+                                            <Input
+                                                type="number"
+                                                placeholder="Max users"
+                                                value={newLimit}
+                                                onChange={(e) => setNewLimit(e.target.value)}
+                                                className="bg-slate-950 border-slate-800 text-white"
+                                            />
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className="text-sm text-slate-400">Update Password</label>
+                                            <div className="flex gap-2">
+                                                <Input
+                                                    type="password"
+                                                    placeholder="New password"
+                                                    value={newPassword}
+                                                    onChange={(e) => setNewPassword(e.target.value)}
+                                                    className="bg-slate-950 border-slate-800 text-white"
+                                                />
+                                                <Button
+                                                    variant="destructive"
+                                                    size="icon"
+                                                    onClick={() => {
+                                                        if (confirm("Are you sure you want to remove the password?")) {
+                                                            socket.emit("update-room-settings", {
+                                                                roomId,
+                                                                password: "" // Empty string removes password
+                                                            });
+                                                            alert("Password removed");
+                                                        }
+                                                    }}
+                                                    title="Remove Password"
+                                                >
+                                                    <Lock className="w-4 h-4" />
+                                                </Button>
+                                            </div>
+                                        </div>
+                                        <Button
+                                            onClick={() => {
+                                                const updates: any = { roomId };
+                                                if (newLimit) updates.limit = parseInt(newLimit);
+                                                if (newPassword) updates.password = newPassword;
+
+                                                socket.emit("update-room-settings", updates);
+                                                setShowSettingsModal(false);
+                                                setNewPassword("");
+                                                setNewLimit("");
+                                            }}
+                                            className="w-full bg-emerald-600 hover:bg-emerald-700"
+                                        >
+                                            Save Room Changes
+                                        </Button>
+                                    </>
+                                )}
                             </CardContent>
                         </Card>
                     </div>

@@ -7,11 +7,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { enableTwoFactor, confirmTwoFactor, disableTwoFactor, getTwoFactorStatus } from "@/actions/two-factor";
 import { useSession, signOut } from "next-auth/react";
 import Image from "next/image";
+import { Copy, ArrowLeft } from "lucide-react";
+import Link from "next/link";
 
 export default function SettingsPage() {
     const { data: session } = useSession();
     const [isEnabled, setIsEnabled] = useState(false);
     const [qrCode, setQrCode] = useState("");
+    const [secret, setSecret] = useState("");
     const [token, setToken] = useState("");
     const [step, setStep] = useState<"idle" | "verify">("idle");
     const [msg, setMsg] = useState("");
@@ -24,8 +27,9 @@ export default function SettingsPage() {
 
     const handleEnable = async () => {
         const res = await enableTwoFactor();
-        if (res.qrCodeUrl) {
+        if (res.qrCodeUrl && res.secret) {
             setQrCode(res.qrCodeUrl);
+            setSecret(res.secret);
             setStep("verify");
         }
     };
@@ -48,10 +52,23 @@ export default function SettingsPage() {
         setMsg("2FA Disabled");
     };
 
-    if (!session) return <div className="p-10 text-white">Loading...</div>;
+    if (!session) {
+        // Redirect if not logged in
+        // Ideally handled by middleware, but client-side check for now
+        if (typeof window !== "undefined") {
+            window.location.href = "/login";
+        }
+        return null;
+    }
 
     return (
-        <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-slate-100">
+        <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-slate-100 relative">
+            <Link href="/" className="absolute top-4 left-4">
+                <Button variant="ghost" className="text-slate-400 hover:text-white">
+                    <ArrowLeft className="w-4 h-4 mr-2" />
+                    Back to Home
+                </Button>
+            </Link>
             <Card className="w-[400px] bg-slate-900 border-slate-800 text-slate-100">
                 <CardHeader>
                     <CardTitle>Settings</CardTitle>
@@ -87,14 +104,29 @@ export default function SettingsPage() {
                                 <div className="flex justify-center bg-white p-2 rounded">
                                     <Image src={qrCode} alt="QR Code" width={150} height={150} />
                                 </div>
-                                <p className="text-xs text-center text-slate-400">Scan with Google Authenticator</p>
+                                <div className="text-center space-y-2">
+                                    <p className="text-xs text-slate-400">Scan with Google Authenticator</p>
+                                    <p className="text-xs text-slate-500">Or enter this key manually:</p>
+                                    <div className="flex items-center gap-2 justify-center">
+                                        <code className="bg-slate-950 px-2 py-1 rounded text-xs font-mono text-emerald-500">{secret}</code>
+                                        <Button
+                                            size="sm"
+                                            variant="ghost"
+                                            className="h-6 w-6 p-0"
+                                            onClick={() => navigator.clipboard.writeText(secret)}
+                                            title="Copy Key"
+                                        >
+                                            <Copy className="w-3 h-3" />
+                                        </Button>
+                                    </div>
+                                </div>
                                 <Input
                                     value={token}
                                     onChange={(e) => setToken(e.target.value)}
                                     placeholder="Enter 6-digit code"
                                     className="bg-slate-950 border-slate-800"
                                 />
-                                <Button onClick={handleVerify} className="w-full">
+                                <Button onClick={handleVerify} className="w-full bg-emerald-600 hover:bg-emerald-700">
                                     Verify & Activate
                                 </Button>
                             </div>

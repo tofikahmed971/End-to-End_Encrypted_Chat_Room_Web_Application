@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { registerUser } from "@/actions/register";
 import Link from "next/link";
-import { UserPlus } from "lucide-react";
+import { UserPlus, ArrowLeft } from "lucide-react";
 
 export default function RegisterPage() {
     const [error, setError] = useState("");
@@ -24,7 +24,13 @@ export default function RegisterPage() {
     };
 
     return (
-        <div className="flex items-center justify-center min-h-screen bg-slate-950">
+        <div className="flex items-center justify-center min-h-screen bg-slate-950 relative">
+            <Link href="/" className="absolute top-4 left-4">
+                <Button variant="ghost" className="text-slate-400 hover:text-white">
+                    <ArrowLeft className="w-4 h-4 mr-2" />
+                    Back to Home
+                </Button>
+            </Link>
             <Card className="w-[350px] bg-slate-900 border-slate-800 text-slate-100">
                 <CardHeader className="space-y-1 text-center">
                     <div className="w-12 h-12 bg-emerald-500/10 rounded-xl flex items-center justify-center mx-auto mb-4">
