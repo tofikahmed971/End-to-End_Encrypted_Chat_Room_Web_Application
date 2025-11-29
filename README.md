@@ -45,7 +45,7 @@ Follow these steps to run the project locally:
 
     ```bash
     git clone https://github.com/tofikahmed971/End-to-End_Encrypted_Chat_Room_Web_Application.git
-    cd secrate_chat
+    cd End-to-End_Encrypted_Chat_Room_Web_Application
     ```
 
 2.  **Install Dependencies**
