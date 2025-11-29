@@ -52,7 +52,7 @@ export default function RegisterPage() {
                             />
                         </div>
                         <div className="space-y-2">
-                            <label htmlFor="password">Password</label>
+                            <label htmlFor="password">Create Password</label>
                             <Input
                                 id="password"
                                 name="password"

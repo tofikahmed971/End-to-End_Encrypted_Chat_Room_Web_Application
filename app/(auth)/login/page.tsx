@@ -34,7 +34,7 @@ export default function LoginPage() {
                 setError(res.error);
             } else {
                 router.refresh();
-                router.push("/settings");
+                router.push("/");
             }
         } catch (err) {
             setError("Something went wrong");

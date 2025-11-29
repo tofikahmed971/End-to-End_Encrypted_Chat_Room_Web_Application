@@ -7,9 +7,11 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Lock, Shield, Zap, Eye, Users, MessageSquare, ArrowRight, CheckCircle2, X } from "lucide-react";
 import Link from "next/link";
+import { useSession, signOut } from "next-auth/react";
 
 export default function Home() {
   const router = useRouter();
+  const { data: session, status } = useSession();
   const [roomCode, setRoomCode] = useState("");
   const [nickname, setNickname] = useState("");
   const [userLimit, setUserLimit] = useState("10");
@@ -68,12 +70,28 @@ export default function Home() {
             </span>
           </div>
           <div className="flex gap-4">
-            <Link href="/login">
-              <Button variant="ghost" className="text-muted-foreground hover:text-foreground">Login</Button>
-            </Link>
-            <Link href="/register">
-              <Button className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg shadow-emerald-500/20">Sign Up</Button>
-            </Link>
+            {status === "authenticated" ? (
+              <>
+                <Link href="/settings">
+                  <Button variant="ghost" className="text-muted-foreground hover:text-foreground">Account Settings</Button>
+                </Link>
+                <Button
+                  onClick={() => signOut()}
+                  className="bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-500/20"
+                >
+                  Sign Out
+                </Button>
+              </>
+            ) : (
+              <>
+                <Link href="/login">
+                  <Button variant="ghost" className="text-muted-foreground hover:text-foreground">Login</Button>
+                </Link>
+                <Link href="/register">
+                  <Button className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg shadow-emerald-500/20">Sign Up</Button>
+                </Link>
+              </>
+            )}
           </div>
         </div>
       </nav>
